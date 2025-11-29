@@ -1,5 +1,7 @@
 package main
 
+import "os"
+
 func main() {
-	return nil
+	os.Exit(0)
 }
