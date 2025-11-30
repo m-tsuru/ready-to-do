@@ -39,7 +39,7 @@ func main() {
 		return c.Redirect("/api/v1")
 	})
 
-	handler.Handler(app)
+	handler.Handler(app, db)
 
 	app.Listen(":8080")
 }
