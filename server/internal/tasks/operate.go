@@ -7,6 +7,43 @@ import (
 	"gorm.io/gorm"
 )
 
+// CalculateRunningTime はタスクのrunning状態の合計時間を計算（秒単位）
+func CalculateRunningTime(db *gorm.DB, taskId string) (int64, error) {
+	var logs []TaskStateChangeLog
+
+	// タスクの全ての状態変更ログを時系列順に取得
+	if err := db.Where("task_id = ?", taskId).Order("created_at ASC").Find(&logs).Error; err != nil {
+		return 0, err
+	}
+
+	if len(logs) == 0 {
+		return 0, nil
+	}
+
+	var totalRunningSeconds int64 = 0
+	var runningStartTime *time.Time
+
+	for _, log := range logs {
+		if log.State == "running" {
+			// running状態になった時刻を記録
+			runningStartTime = &log.CreatedAt
+		} else if runningStartTime != nil {
+			// running以外の状態になった場合、running期間を計算
+			duration := log.CreatedAt.Sub(*runningStartTime)
+			totalRunningSeconds += int64(duration.Seconds())
+			runningStartTime = nil
+		}
+	}
+
+	// 最後がrunning状態のまま終わっている場合、現在時刻までの時間を計算
+	if runningStartTime != nil {
+		duration := time.Since(*runningStartTime)
+		totalRunningSeconds += int64(duration.Seconds())
+	}
+
+	return totalRunningSeconds, nil
+}
+
 // GetParentDependency は指定されたタスクの親タスクをすべて取得
 func GetParentDependency(db *gorm.DB, t *Task) (*[]Task, error) {
 	var parentTasks []Task
@@ -74,6 +111,15 @@ func GetTaskById(db *gorm.DB, Id string) (*Task, error) {
 	return &task, nil
 }
 
+// GetTasksByUserId はユーザーIDでタスクを取得
+func GetTasksByUserId(db *gorm.DB, userId string) (*[]Task, error) {
+	var tasks []Task
+	if err := db.Where("user_id = ?", userId).Order("created_at DESC").Find(&tasks).Error; err != nil {
+		return nil, err
+	}
+	return &tasks, nil
+}
+
 // CreateTask はタスクを作成
 func CreateTask(db *gorm.DB, userId string, name string, description string, relatedUrl string, parentTaskIds []string) (*Task, error) {
 	// タスクを作成。タスク ID は UUID
@@ -113,6 +159,18 @@ func CreateTask(db *gorm.DB, userId string, name string, description string, rel
 	}
 
 	if err := db.Create(taskState).Error; err != nil {
+		return nil, err
+	}
+
+	// 初期状態の変更ログを記録
+	changeLog := &TaskStateChangeLog{
+		Id:        uuid.New().String(),
+		TaskId:    task.Id,
+		State:     "waiting",
+		CreatedAt: time.Now(),
+	}
+
+	if err := db.Create(changeLog).Error; err != nil {
 		return nil, err
 	}
 
@@ -189,6 +247,18 @@ func (t Task) MakeRunning(db *gorm.DB) (bool, error) {
 		return false, err
 	}
 
+	// 状態変更ログを記録
+	changeLog := &TaskStateChangeLog{
+		Id:        uuid.New().String(),
+		TaskId:    t.Id,
+		State:     "running",
+		CreatedAt: time.Now(),
+	}
+
+	if err := db.Create(changeLog).Error; err != nil {
+		return false, err
+	}
+
 	return true, nil
 }
 
@@ -217,6 +287,18 @@ func (t Task) MakeWaiting(db *gorm.DB) (bool, error) {
 		return false, err
 	}
 
+	// 状態変更ログを記録
+	changeLog := &TaskStateChangeLog{
+		Id:        uuid.New().String(),
+		TaskId:    t.Id,
+		State:     "waiting",
+		CreatedAt: time.Now(),
+	}
+
+	if err := db.Create(changeLog).Error; err != nil {
+		return false, err
+	}
+
 	return true, nil
 }
 
@@ -242,6 +324,18 @@ func (t Task) MakeDone(db *gorm.DB) (bool, error) {
 	}
 
 	if err := db.Create(newState).Error; err != nil {
+		return false, err
+	}
+
+	// 状態変更ログを記録
+	changeLog := &TaskStateChangeLog{
+		Id:        uuid.New().String(),
+		TaskId:    t.Id,
+		State:     "done",
+		CreatedAt: time.Now(),
+	}
+
+	if err := db.Create(changeLog).Error; err != nil {
 		return false, err
 	}
 

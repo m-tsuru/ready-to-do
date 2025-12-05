@@ -35,10 +35,6 @@ func main() {
 	}
 
 	app := fiber.New()
-	app.Get("/", func(c *fiber.Ctx) error {
-		return c.Redirect("/api/v1")
-	})
-
 	handler.Handler(app, db)
 
 	app.Listen(":8080")

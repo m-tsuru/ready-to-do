@@ -1,6 +1,8 @@
 package handler
 
 import (
+	"fmt"
+
 	"github.com/gofiber/fiber/v2"
 	"github.com/m-tsuru/ready-to-do/internal/tasks"
 	"github.com/m-tsuru/ready-to-do/internal/users"
@@ -19,9 +21,12 @@ func Handler(app *fiber.App, db *gorm.DB) {
 
 	tasks := v1.Group("/tasks")
 	tasks.Post("/", createTaskHandler(db))
+	tasks.Get("/me", getMyTasksHandler(db))
 	tasks.Get("/:id", getTaskHandler(db))
 	tasks.Get("/:id/parents", getParentTasksHandler(db))
 	tasks.Get("/:id/children", getChildTasksHandler(db))
+	tasks.Get("/:id/running-time", getTaskRunningTimeHandler(db))
+	tasks.Get("/:id/logs", getTaskLogsHandler(db))
 	tasks.Post("/:id/running", makeTaskRunningHandler(db))
 	tasks.Post("/:id/waiting", makeTaskWaitingHandler(db))
 	tasks.Post("/:id/done", makeTaskDoneHandler(db))
@@ -247,6 +252,80 @@ func createTaskHandler(db *gorm.DB) fiber.Handler {
 				"state":       state.State,
 				"is_ready":    isReady,
 			},
+		})
+	}
+}
+
+func getMyTasksHandler(db *gorm.DB) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		user, err := getUserFromToken(c, db)
+		if err != nil {
+			return err
+		}
+
+		myTasks, err := tasks.GetTasksByUserId(db, user.Id)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to get tasks",
+			})
+		}
+
+		// タスクをマップに格納して階層構造を構築
+		taskMap := make(map[string]*tasks.Task)
+		for i := range *myTasks {
+			taskMap[(*myTasks)[i].Id] = &(*myTasks)[i]
+		}
+
+		// 親を持たないルートタスクのリストを作成
+		rootTasks := make([]*tasks.Task, 0)
+		for i := range *myTasks {
+			task := &(*myTasks)[i]
+			parents, _ := tasks.GetParentDependency(db, task)
+			if parents == nil || len(*parents) == 0 {
+				rootTasks = append(rootTasks, task)
+			}
+		}
+
+		// 階層構造のタスクリストを構築
+		taskList := make([]fiber.Map, 0)
+		var buildHierarchy func(*tasks.Task, int, bool)
+		buildHierarchy = func(task *tasks.Task, depth int, hasNextSibling bool) {
+			state, _ := task.GetCurrentState(db)
+			isReady, _ := task.IsReady(db)
+
+			taskData := fiber.Map{
+				"id":               task.Id,
+				"name":             task.Name,
+				"description":      task.Description,
+				"related_url":      task.RelatedUrl,
+				"user_id":          task.UserId,
+				"created_at":       task.CreatedAt,
+				"state":            state.State,
+				"is_ready":         isReady,
+				"depth":            depth,
+				"has_next_sibling": hasNextSibling,
+			}
+			taskList = append(taskList, taskData)
+
+			// 子タスクを再帰的に追加
+			children, _ := tasks.GetChildDependency(db, task)
+			if children != nil {
+				for i := range *children {
+					// 次の兄弟がいるかチェック
+					hasNext := i < len(*children)-1
+					buildHierarchy(&(*children)[i], depth+1, hasNext)
+				}
+			}
+		}
+
+		// ルートタスクから階層構造を構築
+		for i, rootTask := range rootTasks {
+			hasNext := i < len(rootTasks)-1
+			buildHierarchy(rootTask, 0, hasNext)
+		}
+
+		return c.JSON(fiber.Map{
+			"tasks": taskList,
 		})
 	}
 }
@@ -556,5 +635,106 @@ func makeTaskDoneHandler(db *gorm.DB) fiber.Handler {
 				"state": state.State,
 			},
 		})
+	}
+}
+
+func getTaskRunningTimeHandler(db *gorm.DB) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		user, err := getUserFromToken(c, db)
+		if err != nil {
+			return err
+		}
+
+		taskId := c.Params("id")
+		if taskId == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Task ID is required",
+			})
+		}
+
+		task, err := tasks.GetTaskById(db, taskId)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Task not found",
+			})
+		}
+
+		if task.UserId != user.Id {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "Access denied",
+			})
+		}
+
+		runningSeconds, err := tasks.CalculateRunningTime(db, taskId)
+		if err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to calculate running time",
+			})
+		}
+
+		// 秒を時間、分、秒に変換
+		hours := runningSeconds / 3600
+		minutes := (runningSeconds % 3600) / 60
+		seconds := runningSeconds % 60
+
+		return c.JSON(fiber.Map{
+			"task_id":         taskId,
+			"running_seconds": runningSeconds,
+			"running_time": fiber.Map{
+				"hours":   hours,
+				"minutes": minutes,
+				"seconds": seconds,
+			},
+			"formatted": formatDuration(hours, minutes, seconds),
+		})
+	}
+}
+
+func formatDuration(hours, minutes, seconds int64) string {
+	if hours > 0 {
+		return fmt.Sprintf("%dh %dm %ds", hours, minutes, seconds)
+	} else if minutes > 0 {
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	} else {
+		return fmt.Sprintf("%ds", seconds)
+	}
+}
+
+func getTaskLogsHandler(db *gorm.DB) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		user, err := getUserFromToken(c, db)
+		if err != nil {
+			return err
+		}
+
+		taskId := c.Params("id")
+		if taskId == "" {
+			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
+				"error": "Task ID is required",
+			})
+		}
+
+		task, err := tasks.GetTaskById(db, taskId)
+		if err != nil {
+			return c.Status(fiber.StatusNotFound).JSON(fiber.Map{
+				"error": "Task not found",
+			})
+		}
+
+		if task.UserId != user.Id {
+			return c.Status(fiber.StatusForbidden).JSON(fiber.Map{
+				"error": "Access denied",
+			})
+		}
+
+		// TaskStateChangeLog を取得
+		var logs []tasks.TaskStateChangeLog
+		if err := db.Where("task_id = ?", taskId).Order("created_at DESC").Find(&logs).Error; err != nil {
+			return c.Status(fiber.StatusInternalServerError).JSON(fiber.Map{
+				"error": "Failed to retrieve logs",
+			})
+		}
+
+		return c.JSON(logs)
 	}
 }

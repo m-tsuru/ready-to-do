@@ -1,6 +1,8 @@
 package database
 
 import (
+	"database/sql"
+
 	"github.com/alifiroozi80/duckdb"
 	"gorm.io/gorm"
 )
@@ -26,4 +28,25 @@ func ConnectDatabase(dialect gorm.Dialector) (*gorm.DB, error) {
 
 func NewDuckDBDialector(databasePath string) gorm.Dialector {
 	return duckdb.Open(databasePath)
+}
+
+func InitDuckDB(db *gorm.DB) error {
+	sqlDB, err := db.DB()
+	if err != nil {
+		return err
+	}
+
+	queries := []string{
+		"CREATE SCHEMA IF NOT EXISTS main",
+		"SET schema = 'main'",
+	}
+
+	for _, query := range queries {
+		if err := sqlDB.QueryRow(query).Err(); err != nil && err != sql.ErrNoRows {
+			// エラーを無視（既に存在する場合など）
+			continue
+		}
+	}
+
+	return nil
 }
