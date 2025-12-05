@@ -82,6 +82,23 @@ func createTables(db *gorm.DB) error {
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_parent_tasks_task_id ON parent_tasks(task_id)`)
 	db.Exec(`CREATE INDEX IF NOT EXISTS idx_parent_tasks_parent_id ON parent_tasks(parent_id)`)
 
+	// task_states テーブル
+	if err := db.Exec(`
+		CREATE TABLE IF NOT EXISTS task_states (
+			id TEXT PRIMARY KEY,
+			task_id TEXT NOT NULL,
+			state TEXT NOT NULL,
+			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		)
+	`).Error; err != nil {
+		return err
+	}
+
+	// task_states のインデックス
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_states_task_id ON task_states(task_id)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_states_state ON task_states(state)`)
+	db.Exec(`CREATE INDEX IF NOT EXISTS idx_task_states_created_at ON task_states(created_at)`)
+
 	// task_state_change_logs テーブル
 	if err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS task_state_change_logs (
